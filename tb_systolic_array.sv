@@ -18,7 +18,7 @@ module tb_systolic_array;
     integer signed b_matrix[K][COLS];
     integer signed expected[ROWS][COLS];
 
-    always #5 clk = ~clk;
+    always #5 clk <= ~clk;
 
     systolic_array #(
         .ROWS(ROWS),
