@@ -39,6 +39,13 @@ module attention_softmax #(
     logic input_accept;
     logic output_accept;
 
+    initial begin
+        if (IN_FRAC_BITS < 2)
+            $error("IN_FRAC_BITS must be at least 2 for LUT interpolation");
+        if (PROB_WIDTH > 16)
+            $error("PROB_WIDTH must be 16 or less");
+    end
+
     function automatic logic [EXP_WIDTH-1:0] exp_lut_entry(
         input logic [4:0] index
     );
@@ -91,7 +98,7 @@ module attention_softmax #(
     endfunction
 
     always_comb begin
-        s_axis_tready = state == LOAD;
+        s_axis_tready = rst_n && state == LOAD;
         input_accept  = s_axis_tvalid && s_axis_tready;
         m_axis_tvalid = state == OUTPUT;
         output_accept = m_axis_tvalid && m_axis_tready;

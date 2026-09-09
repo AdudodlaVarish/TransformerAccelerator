@@ -19,7 +19,7 @@ module tb_attention_softmax;
     logic protocol_error;
     integer signed vectors[4][LENGTH];
 
-    always #5 clk = ~clk;
+    always #5 clk <= ~clk;
 
     attention_softmax #(
         .LENGTH(LENGTH),

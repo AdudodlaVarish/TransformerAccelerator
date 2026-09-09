@@ -36,7 +36,7 @@ module tb_transformer_gemm_accelerator;
     integer signed b_matrix[K*K_TILES][COLS];
     integer signed expected[ROWS][COLS];
 
-    always #5 clk = ~clk;
+    always #5 clk <= ~clk;
 
     transformer_gemm_accelerator #(
         .ROWS(ROWS),
@@ -205,6 +205,15 @@ module tb_transformer_gemm_accelerator;
         assert (output_stall_cycles == 3) else $fatal(1, "output stall counter mismatch");
         assert (total_cycles > compute_cycles) else $fatal(1, "total cycle counter mismatch");
 
+        send_bad_tlast();
+
+        @(negedge clk);
+        counters_clear = 1'b1;
+        @(posedge clk);
+        #1;
+        counters_clear = 1'b0;
+        assert (!protocol_error)
+            else $fatal(1, "new command clear did not reset protocol error");
         send_bad_tlast();
 
         @(negedge clk);

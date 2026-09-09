@@ -41,7 +41,7 @@ module systolic_array #(
                     a_bus[row][col+1] <= '0;
                     b_bus[row+1][col] <= '0;
                     c_out[row][col]   <= '0;
-                end else begin
+                end else if (busy) begin
                     a_bus[row][col+1] <= a_bus[row][col];
                     b_bus[row+1][col] <= b_bus[row][col];
                     c_out[row][col]   <= c_out[row][col] + ACC_WIDTH'(product);

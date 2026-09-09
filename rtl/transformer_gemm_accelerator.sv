@@ -7,6 +7,7 @@ module transformer_gemm_accelerator #(
     parameter int DATA_WIDTH = 8,
     parameter int ACC_WIDTH  = 32,
     parameter int REQUANT_MULT_WIDTH = 16,
+    parameter string BUFFER_RAM_STYLE = "block",
     localparam int K_ADDR_WIDTH = (K <= 1) ? 1 : $clog2(K),
     localparam int REQUANT_SHIFT_WIDTH =
         $clog2(ACC_WIDTH + REQUANT_MULT_WIDTH + 2),
@@ -41,8 +42,8 @@ module transformer_gemm_accelerator #(
     output logic [31:0] tiles_completed,
     output logic [31:0] results_transferred
 );
-    // s_axis_tuser[0]: accumulate this K tile onto the previous partial sum.
-    // s_axis_tuser[1]: stream the result after this K tile completes.
+    // s_axis_tuser[0] accumulate this K tile onto the previous partial sum.
+    // s_axis_tuser[1] stream the result after this K tile completes.
     logic [1:0] bank_full;
     logic [1:0] bank_accumulate;
     logic [1:0] bank_emit;
@@ -74,26 +75,29 @@ module transformer_gemm_accelerator #(
     logic output_pending;
     logic input_accept;
     logic expected_last;
+    logic active_cycle;
 
     always_comb begin
         for (int row = 0; row < ROWS; row++)
             a_load[row] = s_axis_tdata[row*DATA_WIDTH +: DATA_WIDTH];
         for (int col = 0; col < COLS; col++)
             b_load[col] = s_axis_tdata[(ROWS+col)*DATA_WIDTH +: DATA_WIDTH];
-
-        s_axis_tready = !bank_full[write_bank] && engine_load_ready;
-        input_accept  = s_axis_tvalid && s_axis_tready;
-        expected_last = beat_count == K_ADDR_WIDTH'(K - 1);
-        // ponytail: one result buffer; add a second if output stalls limit throughput.
-        engine_start  = !engine_busy && bank_full[next_compute_bank]
-                      && !output_pending && !(engine_done && active_emit);
-
-        m_axis_tvalid = output_pending;
-        m_axis_tdata  = output_buffer[output_index];
-        m_axis_tlast  = output_pending
-                      && output_index == OUTPUT_INDEX_WIDTH'(OUTPUTS - 1);
-        busy = engine_busy;
     end
+
+    assign s_axis_tready = rst_n && !bank_full[write_bank] && engine_load_ready;
+    assign input_accept  = s_axis_tvalid && s_axis_tready;
+    assign expected_last = beat_count == K_ADDR_WIDTH'(K - 1);
+    // ponytail: one result buffer; add a second if output stalls limit throughput.
+    assign engine_start  = rst_n && !engine_busy && bank_full[next_compute_bank]
+                         && !output_pending && !(engine_done && active_emit);
+
+    assign m_axis_tvalid = output_pending;
+    assign m_axis_tdata  = output_buffer[output_index];
+    assign m_axis_tlast  = output_pending
+                         && output_index == OUTPUT_INDEX_WIDTH'(OUTPUTS - 1);
+    assign busy = bank_full != 0 || beat_count != 0 || engine_busy || output_pending;
+    assign active_cycle = s_axis_tvalid || bank_full != 0 || beat_count != 0
+                        || engine_busy || output_pending;
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
@@ -113,6 +117,8 @@ module transformer_gemm_accelerator #(
             output_pending     <= 1'b0;
             protocol_error     <= 1'b0;
         end else begin
+            if (counters_clear)
+                protocol_error <= 1'b0;
             if (input_accept) begin
                 if (beat_count == 0) begin
                     incoming_accumulate <= s_axis_tuser[0];
@@ -178,7 +184,8 @@ module transformer_gemm_accelerator #(
             tiles_completed     <= '0;
             results_transferred <= '0;
         end else begin
-            total_cycles <= total_cycles + 1'b1;
+            if (active_cycle)
+                total_cycles <= total_cycles + 1'b1;
             if (engine_busy)
                 compute_cycles <= compute_cycles + 1'b1;
             if (s_axis_tvalid && !s_axis_tready)
@@ -198,7 +205,8 @@ module transformer_gemm_accelerator #(
         .K                 (K),
         .DATA_WIDTH        (DATA_WIDTH),
         .ACC_WIDTH         (ACC_WIDTH),
-        .REQUANT_MULT_WIDTH(REQUANT_MULT_WIDTH)
+        .REQUANT_MULT_WIDTH(REQUANT_MULT_WIDTH),
+        .BUFFER_RAM_STYLE  (BUFFER_RAM_STYLE)
     ) engine (
         .clk                (clk),
         .rst_n              (rst_n),

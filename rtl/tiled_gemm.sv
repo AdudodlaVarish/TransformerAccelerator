@@ -6,9 +6,13 @@ module tiled_gemm #(
     parameter int K          = 4,
     parameter int DATA_WIDTH = 8,
     parameter int ACC_WIDTH  = 32,
+    parameter int REQUANT_MULT_WIDTH = 16,
+    parameter string BUFFER_RAM_STYLE = "block",
     localparam int K_ADDR_WIDTH = (K <= 1) ? 1 : $clog2(K),
     localparam int TOTAL_CYCLES = K + ROWS + COLS - 2,
-    localparam int FEED_WIDTH   = $clog2(TOTAL_CYCLES + 1)
+    localparam int FEED_WIDTH   = $clog2(TOTAL_CYCLES + 1),
+    localparam int REQUANT_SHIFT_WIDTH =
+        $clog2(ACC_WIDTH + REQUANT_MULT_WIDTH + 2)
 ) (
     input  logic                         clk,
     input  logic                         rst_n,
@@ -22,12 +26,19 @@ module tiled_gemm #(
 
     input  logic                         start,
     input  logic                         start_bank,
+    input  logic                         accumulate,
+    input  logic        [REQUANT_MULT_WIDTH-1:0] requant_multiplier,
+    input  logic        [REQUANT_SHIFT_WIDTH-1:0] requant_shift,
+    input  logic signed [DATA_WIDTH-1:0] requant_zero_point,
     output logic                         busy,
     output logic                         done,
     output logic                         result_bank,
-    output logic signed [ACC_WIDTH-1:0]  c_out[ROWS][COLS]
+    output logic signed [ACC_WIDTH-1:0]  c_out[ROWS][COLS],
+    output logic signed [DATA_WIDTH-1:0] q_out[ROWS][COLS]
 );
+    (* ram_style = BUFFER_RAM_STYLE *)
     logic signed [DATA_WIDTH-1:0] a_buffer[2][ROWS][K];
+    (* ram_style = BUFFER_RAM_STYLE *)
     logic signed [DATA_WIDTH-1:0] b_buffer[2][COLS][K];
     logic signed [DATA_WIDTH-1:0] a_stream[ROWS];
     logic signed [DATA_WIDTH-1:0] b_stream[COLS];
@@ -35,12 +46,21 @@ module tiled_gemm #(
     logic                         feeding;
     logic                         array_start;
     logic                         bank_conflict;
+    logic                         active_accumulate;
+    logic signed [ACC_WIDTH-1:0]  previous_sum[ROWS][COLS];
+    logic signed [ACC_WIDTH-1:0]  array_c_out[ROWS][COLS];
+
+    initial begin
+        if (BUFFER_RAM_STYLE != "block" && BUFFER_RAM_STYLE != "ultra")
+            $error("BUFFER_RAM_STYLE must be block or ultra");
+    end
 
     always_comb begin
-        array_start  = start && !busy;
+        array_start  = rst_n && start && !busy;
         bank_conflict = (busy && load_bank == result_bank)
                       || (array_start && load_bank == start_bank);
-        load_ready = !bank_conflict && int'($unsigned(load_k)) < K;
+        load_ready = rst_n && !bank_conflict
+                   && int'($unsigned(load_k)) < K;
     end
 
     always_ff @(posedge clk) begin
@@ -94,6 +114,23 @@ module tiled_gemm #(
         end
     end
 
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            active_accumulate <= 1'b0;
+            for (int row = 0; row < ROWS; row++)
+                for (int col = 0; col < COLS; col++)
+                    previous_sum[row][col] <= '0;
+        end else begin
+            if (done) begin
+                for (int row = 0; row < ROWS; row++)
+                    for (int col = 0; col < COLS; col++)
+                        previous_sum[row][col] <= c_out[row][col];
+            end
+            if (array_start)
+                active_accumulate <= accumulate;
+        end
+    end
+
     systolic_array #(
         .ROWS      (ROWS),
         .COLS      (COLS),
@@ -106,8 +143,30 @@ module tiled_gemm #(
         .start(array_start),
         .a_in (a_stream),
         .b_in (b_stream),
-        .c_out(c_out),
+        .c_out(array_c_out),
         .busy (busy),
         .done (done)
     );
+
+    for (genvar row = 0; row < ROWS; row++) begin : gen_output_rows
+        for (genvar col = 0; col < COLS; col++) begin : gen_output_cols
+            always_comb begin
+                c_out[row][col] = active_accumulate
+                                ? previous_sum[row][col] + array_c_out[row][col]
+                                : array_c_out[row][col];
+            end
+
+            requantize #(
+                .IN_WIDTH  (ACC_WIDTH),
+                .OUT_WIDTH (DATA_WIDTH),
+                .MULT_WIDTH(REQUANT_MULT_WIDTH)
+            ) output_quantizer (
+                .value     (c_out[row][col]),
+                .multiplier(requant_multiplier),
+                .shift     (requant_shift),
+                .zero_point(requant_zero_point),
+                .result    (q_out[row][col])
+            );
+        end
+    end
 endmodule
